@@ -6,8 +6,8 @@ import socket
 import argparse
 import requests
 from requests.exceptions import RequestException, ConnectionError, Timeout
-import urllib3 # Untuk menangani warning
-import re # Untuk validasi format proxy
+import urllib3 
+import re
 
 # --- Konfigurasi Global ---
 TARGET_URLS = []
@@ -293,7 +293,6 @@ def main():
 
     # Ringkasan konfigurasi dicetak HANYA jika argumen --no-verify-ssl TIDAK digunakan.
     # Ini agar tidak mengganggu output jika warning memang sudah dimatikan.
-    # Namun, agar konsisten, kita akan selalu mencetak ringkasan.
     print("--- Starting HTTP Flood Attack Configuration ---")
     print(f"Target URLs: {TARGET_URLS}")
     print(f"Proxy File: {PROXY_FILE}")
@@ -304,7 +303,7 @@ def main():
     print(f"SSL Verification: {'Enabled' if VERIFY_SSL else 'Disabled'}")
     print(f"Proxy Timeout: {PROXY_TIMEOUT}s")
     print(f"Request Timeout: {REQUEST_TIMEOUT}s")
-    print("---------------------------------------------")
+    print("------------------------------")
     
     proxy_list = load_proxies(PROXY_FILE, args.check_proxies)
     
