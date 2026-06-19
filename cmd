@@ -1,4 +1,4 @@
 pkg update && pkg upgrade
-pkg install python git openssl-dev
+pkg install openssl
 pip install requests
 
